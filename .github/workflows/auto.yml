@@ -3,7 +3,7 @@ name: Auto
 on:
   schedule:
     # UTC 23:00 = JST 翌日 08:00
-    - cron: "0 23 0 * *"
+    - cron: "0 23 2 * *"
   workflow_dispatch:
 
 env:
