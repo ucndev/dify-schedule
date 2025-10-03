@@ -1,5 +1,8 @@
 name: Auto
 
+# Dify日次処理ワークフローをキック
+# https://u-can.chat/app/056177e2-5900-4d96-9274-c54a34bc83db/workflow
+
 on:
   schedule:
     # UTC 0:00 = JST 翌日 09:00
