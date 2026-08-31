@@ -1,26 +1,51 @@
 name: Auto
 
-# Dify日次処理ワークフローをキック
+# Dify ワークフローをキック
 # https://u-can.chat/app/056177e2-5900-4d96-9274-c54a34bc83db/workflow
+#
+# Dify を叩くのは 1日2回（午前 / 午後）だけ。
+# GitHub Actions の schedule は高負荷時に遅延・ドロップされるため、
+# 各スロットに保険枠を4本ずつ打ち、actions/cache による重複排除で
+# 「スロットごとに厳密に1回だけ」実行する（Dify 側の冪等性を前提にしない）。
+# どちらのスロットかは Dify に inputs の trigger_mode で明示的に渡す。
+# 実行時刻は常に25〜45分ほど遅延するため、時刻ではなく起動した cron 式で判定している。
 
 on:
   schedule:
-    # UTC 0:00 = JST 翌日 09:00
+    # 午前スロット（JST 8:00 / 9:00 / 10:00 / 11:00）
     # ┌───────────── 分 (0 - 59)
     # │ ┌─────────── 時 (0 - 23, UTC)
     # │ │ ┌───────── 日 (1 - 31)
     # │ │ │ ┌─────── 月 (1 - 12)
     # │ │ │ │ ┌───── 曜日 (0 - 7) (0 または 7 = 日曜)
     # │ │ │ │ │
-    # │ │ │ │ │
     # * * * * *
-    - cron: "0 * * * *"
+    - cron: "0 23 * * *"
+    - cron: "0 0 * * *"
+    - cron: "0 1 * * *"
+    - cron: "0 2 * * *"
+    # 午後スロット（JST 14:00 / 15:00 / 16:00 / 17:00）
+    - cron: "0 5 * * *"
+    - cron: "0 6 * * *"
+    - cron: "0 7 * * *"
+    - cron: "0 8 * * *"
   workflow_dispatch:
+    inputs:
+      trigger_mode:
+        description: 'Dify に渡す trigger_mode'
+        type: choice
+        options:
+          - morning
+          - afternoon
+        default: morning
+      force:
+        description: '当日そのスロットが実行済みでも強制的に実行する'
+        type: boolean
+        default: false
 
 env:
   DIFY_TOKENS: ${{ secrets.DIFY_TOKENS }}
   DIFY_BASE_URL: ${{ secrets.DIFY_BASE_URL }}
-  DIFY_INPUTS: ${{ secrets.DIFY_INPUTS }}
   EMAIL_USER: ${{ secrets.EMAIL_USER }}
   EMAIL_PASS: ${{ secrets.EMAIL_PASS }}
   EMAIL_TO: ${{ secrets.EMAIL_TO }}
@@ -37,11 +62,90 @@ jobs:
   DifyWorkflow:
     runs-on: ubuntu-latest
     steps:
-    - uses: actions/checkout@v4
-    - uses: actions/setup-node@v4
-      with:
-        node-version: '20'
-    - name: Run Project
-      run: |
-        yarn
-        yarn workflowDify
+      # 起動した cron 式からスロットを決める。
+      # 実行時刻を見ると遅延で午前/午後を誤判定するため、時刻は使わない。
+      - name: スロットを判定
+        id: slot
+        env:
+          SCHEDULE: ${{ github.event.schedule }}
+          INPUT_MODE: ${{ inputs.trigger_mode }}
+        run: |
+          case "$SCHEDULE" in
+            "0 23 * * *"|"0 0 * * *"|"0 1 * * *"|"0 2 * * *")
+              MODE=morning ;;
+            "0 5 * * *"|"0 6 * * *"|"0 7 * * *"|"0 8 * * *")
+              MODE=afternoon ;;
+            *)
+              # workflow_dispatch、または cron 変更直後に旧定義で起動した場合
+              if [ -n "$SCHEDULE" ]; then
+                echo "::warning::未知の cron 式 ($SCHEDULE) で起動しました。morning として扱います"
+              fi
+              MODE="${INPUT_MODE:-morning}" ;;
+          esac
+          DATE=$(TZ=Asia/Tokyo date +%F)
+          echo "mode=$MODE" >> "$GITHUB_OUTPUT"
+          echo "date=$DATE" >> "$GITHUB_OUTPUT"
+          echo "スロット: $MODE / JST日付: $DATE"
+
+      # 同一スロットが当日すでに実行済みかをキーの有無だけで確認する
+      - name: 当日の実行済みチェック
+        id: dedupe
+        uses: actions/cache/restore@v4
+        with:
+          path: .slot-marker
+          key: dify-slot-${{ steps.slot.outputs.mode }}-${{ steps.slot.outputs.date }}
+          lookup-only: true
+
+      - name: 実行要否を判定
+        id: gate
+        env:
+          HIT: ${{ steps.dedupe.outputs.cache-hit }}
+          FORCE: ${{ inputs.force }}
+          MODE: ${{ steps.slot.outputs.mode }}
+        run: |
+          if [ "$HIT" = "true" ] && [ "$FORCE" != "true" ]; then
+            echo "run=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::$MODE スロットは本日実行済みのためスキップします"
+          else
+            echo "run=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: actions/checkout@v4
+        if: steps.gate.outputs.run == 'true'
+
+      - uses: actions/setup-node@v4
+        if: steps.gate.outputs.run == 'true'
+        with:
+          node-version: '20'
+
+      - name: Run Project
+        if: steps.gate.outputs.run == 'true'
+        env:
+          DIFY_INPUTS_BASE: ${{ secrets.DIFY_INPUTS }}
+          TRIGGER_MODE: ${{ steps.slot.outputs.mode }}
+        run: |
+          # 既存の DIFY_INPUTS に trigger_mode をマージして渡す。
+          # secret を GITHUB_OUTPUT/GITHUB_ENV に出さないよう、このステップ内で完結させる。
+          BASE="$DIFY_INPUTS_BASE"
+          [ -z "$BASE" ] && BASE='{}'
+          if ! DIFY_INPUTS=$(jq -cn --argjson base "$BASE" --arg m "$TRIGGER_MODE" \
+                '$base + {trigger_mode: $m}' 2>/dev/null); then
+            echo "::warning::DIFY_INPUTS が不正な JSON のため trigger_mode のみ渡します"
+            DIFY_INPUTS=$(jq -cn --arg m "$TRIGGER_MODE" '{trigger_mode: $m}')
+          fi
+          export DIFY_INPUTS
+          yarn
+          yarn workflowDify
+
+      # 実行が成功したときだけマーカーを残す。
+      # 失敗時は残さないので、同じスロットの後続の保険枠がリトライする。
+      - name: 実行済みマーカーを作成
+        if: steps.gate.outputs.run == 'true' && success()
+        run: echo "$GITHUB_RUN_ID" > .slot-marker
+
+      - name: 実行済みマーカーを保存
+        if: steps.gate.outputs.run == 'true' && success()
+        uses: actions/cache/save@v4
+        with:
+          path: .slot-marker
+          key: dify-slot-${{ steps.slot.outputs.mode }}-${{ steps.slot.outputs.date }}
