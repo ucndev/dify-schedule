@@ -432,7 +432,8 @@ export class WorkflowClient extends DifyClient {
               let outputs = {}
               if(data.outputs) {
                   try {
-                    outputs = JSON.parse(data.outputs)
+                    // 旧 Dify は outputs を JSON 文字列で、現行はオブジェクトで返す
+                    outputs = typeof data.outputs === 'string' ? JSON.parse(data.outputs) : data.outputs
                   } catch (error) {
                     console.log(`获取工作流执行结果,失败:${error}`)
                   }
