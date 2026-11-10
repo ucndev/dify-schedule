@@ -90,7 +90,7 @@ jobs:
       # 同一スロットが当日すでに実行済みかをキーの有無だけで確認する
       - name: 当日の実行済みチェック
         id: dedupe
-        uses: actions/cache/restore@v4
+        uses: actions/cache/restore@v6
         with:
           path: .slot-marker
           key: dify-slot-${{ steps.slot.outputs.mode }}-${{ steps.slot.outputs.date }}
@@ -110,13 +110,13 @@ jobs:
             echo "run=true" >> "$GITHUB_OUTPUT"
           fi
 
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         if: steps.gate.outputs.run == 'true'
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         if: steps.gate.outputs.run == 'true'
         with:
-          node-version: '20'
+          node-version: '24'
 
       - name: Run Project
         if: steps.gate.outputs.run == 'true'
@@ -145,7 +145,7 @@ jobs:
 
       - name: 実行済みマーカーを保存
         if: steps.gate.outputs.run == 'true' && success()
-        uses: actions/cache/save@v4
+        uses: actions/cache/save@v6
         with:
           path: .slot-marker
           key: dify-slot-${{ steps.slot.outputs.mode }}-${{ steps.slot.outputs.date }}
